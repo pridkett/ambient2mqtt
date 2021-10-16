@@ -36,6 +36,11 @@ Configuration is done via a TOML file. Here's a simple example configuration:
     client_id = "ambient2mqtt"
     topic_prefix = "weather"
     topic = "ws-2902"
+[hass]
+    discovery = true
+    discovery_prefix = "homeassistant"
+    object_id = "ws-2902a"
+
 ```
 
 License
