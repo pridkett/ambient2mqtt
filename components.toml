@@ -33,7 +33,7 @@ unit="°F"
 # NOTE: This gets reported even on some devices without a CO2 sensor
 [sensors.batt_co2]
 name="batt_co2"
-platform="sensor_binary"
+platform="binary_sensor"
 device_class="battery"
 icon="mdi:battery"
 
@@ -42,7 +42,7 @@ icon="mdi:battery"
 # 0 = Bad
 [sensors.battout]
 name="backup_battery"
-platform="sensor_binary"
+platform="binary_sensor"
 device_class="battery"
 icon="mdi:battery"
 
