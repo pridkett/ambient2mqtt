@@ -4,8 +4,11 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	_ "embed"
 	"encoding/json"
@@ -15,6 +18,9 @@ import (
 
 	"github.com/naoina/toml"
 	"github.com/withmandala/go-log"
+
+	_ "github.com/influxdata/influxdb1-client" // this is important because of the bug in go mod
+	influxclient "github.com/influxdata/influxdb1-client/v2"
 )
 
 type hassMqttConfigDevice struct {
@@ -64,12 +70,19 @@ type tomlConfigMQTT struct {
 	Topic          string
 }
 
+type tomlConfigInflux struct {
+	Hostname string
+	Port     int
+	Database string
+}
+
 // Master configuration structure
 // This is usually passed in on the command line
 type tomlConfig struct {
-	Http tomlConfigHTTP
-	Mqtt tomlConfigMQTT
-	Hass tomlConfigHass
+	Http   tomlConfigHTTP
+	Mqtt   tomlConfigMQTT
+	Hass   tomlConfigHass
+	Influx tomlConfigInflux
 }
 
 // a single component definition needed for HomeAssistant
@@ -150,6 +163,7 @@ func main() {
 	}
 
 	http.HandleFunc("/", processData)
+	http.HandleFunc("/data/report", processData)
 	http.HandleFunc("/data/report/", processData)
 
 	//Use the default DefaultServeMux.
@@ -270,7 +284,7 @@ func processData(w http.ResponseWriter, r *http.Request) {
 
 		var stationType string
 		if query.Get("stationtype") != "" {
-			stationType = string(query.Get("stationtype")[0])
+			stationType = string(query.Get("stationtype"))
 		}
 
 		for key, value := range query {
@@ -298,8 +312,97 @@ func processData(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	write_influx(query)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	retval := fmt.Sprintf("{ \"status\": \"accepted\", \"num_values\": %d }", len(query))
 	w.Write([]byte(retval))
+}
+
+func simple_parseFloat(s string) float64 {
+	rv, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		logger.Fatalf("error converting \"%s\" to float64: %s", s, err)
+	}
+	return rv
+}
+
+func simple_parseInt(s string) int64 {
+	rv, err := strconv.ParseInt(s, 0, 64)
+	if err != nil {
+		logger.Fatalf("error converting \"%s\" to int32: %s", s, err)
+	}
+	return rv
+}
+
+func write_influx(query url.Values) {
+	ignoredFields := []string{"PASSKEY", "stationtype", "dateutc"}
+
+	// 	tempf=63.1 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: eventrainin=0.000 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: dailyrainin=0.000 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: solarradiation=645.94 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: uv=6 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: baromabsin=29.534 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: maxdailygust=11.4 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: batt_co2=1 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: humidityin=36 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: baromrelin=29.953 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: humidity=35 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: winddir=292 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: windgustmph=2.2 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: hourlyrainin=0.000 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: weeklyrainin=0.000 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: tempinf=64.0 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: windspeedmph=2.2 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: monthlyrainin=0.000 (type=string)
+	// [INFO]  2022/05/01 17:20:36 Adding Key: totalrainin=15.610 (type=string)
+
+	intfields := []string{"uv", "batt_co2", "winddir", "humidity", "humidityin"}
+
+	c, err := influxclient.NewHTTPClient(influxclient.HTTPConfig{
+		Addr: fmt.Sprintf("http://%s:%d", config.Influx.Hostname, config.Influx.Port),
+	})
+	if err != nil {
+		logger.Errorf("Error creating InfluxDB Client: ", err.Error())
+	}
+	defer c.Close()
+
+	bp, err := influxclient.NewBatchPoints(influxclient.BatchPointsConfig{
+		Database:  config.Influx.Database,
+		Precision: "s",
+	})
+
+	if err != nil {
+		logger.Errorf("error creating batchpoints: %s", err)
+	}
+
+	tags := map[string]string{"host": "edgewater"}
+	values := map[string]interface{}{}
+
+	for key, value := range query {
+		if arrayContains(ignoredFields, key) {
+			continue
+		}
+		if arrayContains(intfields, key) {
+			values[key] = simple_parseInt(value[0])
+		} else {
+			values[key] = simple_parseFloat(value[0])
+		}
+		logger.Infof("Added Key: %s=%v (type=%s)", key, values[key], reflect.TypeOf(values[key]))
+	}
+
+	point, err := influxclient.NewPoint("weather", tags, values, time.Now())
+	if err != nil {
+		logger.Fatalf("Error: %s", err)
+	}
+
+	bp.AddPoint(point)
+
+	err = c.Write(bp)
+
+	if err != nil {
+		logger.Fatal(err)
+	}
 }
