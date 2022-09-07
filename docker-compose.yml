@@ -1,0 +1,14 @@
+version: "3"
+
+services:
+  ambient2mqtt:
+    container_name: ambient2mqtt
+    hostname: ambient2mqtt
+    image: pridkett/ambient2mqtt
+    volumes:
+      - './config.toml:/config.toml'
+    restart: unless-stopped
+    ports:
+      - "2466:2466/tcp"
+    dns:
+      - 192.168.151.2
