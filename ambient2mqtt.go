@@ -228,6 +228,9 @@ func getHassMQTTConfig(key string, unique_id string) hassMqttConfig {
 		device_config.Device = device
 		device_config.Qos = 1
 		device_config.UniqueId = getHassMQTTUniqueId(key, unique_id)
+		if value.Icon != nil {
+			device_config.Icon = *value.Icon
+		}
 	}
 
 	return device_config

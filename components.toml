@@ -51,12 +51,14 @@ name="barometer_absolute"
 platform="sensor"
 device_class="pressure"
 unit="inHg"
+icon="mdi:gauge"
 
 [sensors.baromrelin]
 name="barometer_relative"
 platform="sensor"
 device_class="pressure"
 unit="inHg"
+icon="mdi:gauge"
 
 [sensors.winddir]
 name="wind_direction"
@@ -81,6 +83,12 @@ name="wind_speed"
 platform="sensor"
 icon="mdi:weather-windy"
 unit="mph"
+
+[sensors.yearlyrainin]
+name="yearly_rain"
+platform="sensor"
+icon="mdi:water"
+unit="in"
 
 [sensors.monthlyrainin]
 name="monthly_rain"
@@ -123,6 +131,7 @@ name="solar_radiation"
 platform="sensor"
 device_class="illuminance"
 unit="W/m^2"
+icon="mdi:sun-wireless"
 
 [sensors.uv]
 name="uv_index"
