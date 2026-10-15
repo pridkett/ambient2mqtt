@@ -64,6 +64,17 @@ func TestRow(t *testing.T) {
 			t.Errorf("%s = %v, want %v", w.columns[i].name, row[i], want[i])
 		}
 	}
+	// glitches above the plausible maximum are NULL
+	w.columns = append(w.columns, pgColumn{"solarradiation", "double precision"}, pgColumn{"uv", "integer"})
+	row = w.row(pgReport{ts, mustQuery(t, "solarradiation=2367.8&uv=15")})
+	if row[len(row)-2] != nil || row[len(row)-1] != nil {
+		t.Errorf("glitch row %v", row)
+	}
+	row = w.row(pgReport{ts, mustQuery(t, "solarradiation=417.66&uv=4")})
+	if row[len(row)-2] != 417.66 || row[len(row)-1] != int64(4) {
+		t.Errorf("normal row %v", row)
+	}
+
 	// keys without a column are noted once, never the passkey or the station clock
 	if !w.unknown["tempinf"] || w.unknown["PASSKEY"] || w.unknown["dateutc"] {
 		t.Errorf("unknown keys %v", w.unknown)

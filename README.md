@@ -66,7 +66,7 @@ Influx requests are 1.x. Each output is optional: leave out `[influx]` or `[time
 Each report becomes one row in a wide table. The program reads the table's columns at startup and fills
 each one from the report key of the same name (converted to the column's type); columns a report lacks
 are NULL, and report keys without a column are logged once and skipped, so a new station key only needs
-a new column. The table needs `time` and `station` columns; `PASSKEY` (the station's MAC) and `dateutc`
+a new column. Solar radiation above 1,400 W/m² and UV above 12 are sensor glitches and stored as NULL. The table needs `time` and `station` columns; `PASSKEY` (the station's MAC) and `dateutc`
 are never stored. The connection comes from the standard libpq environment variables (`PGHOST`, `PGPORT`,
 `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGSSLMODE`), so the config file holds no credentials. The schema used
 in testing is `testSchema` in `timescale_test.go`.

@@ -31,6 +31,11 @@ var errSchema = errors.New("schema mismatch")
 // own clock (rows are timestamped on receipt, as in InfluxDB).
 var pgSkipKeys = map[string]bool{"PASSKEY": true, "dateutc": true}
 
+// Readings above these are sensor glitches and stored as NULL: the station
+// has logged solar radiation up to 2,367.8 W/m² (above the ~1,361 W/m²
+// that even reaches the top of the atmosphere) with UV 14-15 in October.
+var pgMax = map[string]float64{"solarradiation": 1400, "uv": 12}
+
 type pgColumn struct {
 	name, dataType string
 }
@@ -127,6 +132,16 @@ func pgValue(v, dataType string) (any, bool) {
 	}
 }
 
+func pgFloat(v any) float64 {
+	switch v := v.(type) {
+	case int64:
+		return float64(v)
+	case float64:
+		return v
+	}
+	return math.NaN()
+}
+
 // row builds a report's values in column order.
 func (w *pgWriter) row(rep pgReport) []any {
 	row := make([]any, len(w.columns))
@@ -146,6 +161,10 @@ func (w *pgWriter) row(rep pgReport) []any {
 		}
 		used[c.name] = true
 		if val, ok := pgValue(v, c.dataType); ok {
+			if max, limited := pgMax[c.name]; limited && pgFloat(val) > max {
+				logger.Warnf("TimescaleDB: %s=%s is above %v, storing NULL", c.name, v, max)
+				continue
+			}
 			row[i] = val
 		} else {
 			logger.Warnf("TimescaleDB: can't store %s=%q in a %s column, leaving it NULL", c.name, v, c.dataType)
