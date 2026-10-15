@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -79,10 +81,11 @@ type tomlConfigInflux struct {
 // Master configuration structure
 // This is usually passed in on the command line
 type tomlConfig struct {
-	Http   tomlConfigHTTP
-	Mqtt   tomlConfigMQTT
-	Hass   tomlConfigHass
-	Influx tomlConfigInflux
+	Http      tomlConfigHTTP
+	Mqtt      tomlConfigMQTT
+	Hass      tomlConfigHass
+	Influx    tomlConfigInflux
+	Timescale tomlConfigTimescale
 }
 
 // a single component definition needed for HomeAssistant
@@ -110,6 +113,7 @@ var logger *log.Logger
 var config tomlConfig
 var components tomlComponents
 var client mqtt.Client
+var pg *pgWriter
 
 //go:embed components.toml
 var components_string []byte
@@ -160,6 +164,14 @@ func main() {
 	client = mqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		panic(token.Error())
+	}
+
+	if config.Timescale != (tomlConfigTimescale{}) {
+		var err error
+		if pg, err = newPGWriter(context.Background(), config.Timescale); err != nil {
+			logger.Fatal(err)
+		}
+		logger.Infof("Writing to TimescaleDB table %s as station %s", config.Timescale.Table, config.Timescale.Station)
 	}
 
 	http.HandleFunc("/", processData)
@@ -315,7 +327,23 @@ func processData(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	write_influx(query)
+	if pg != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		n, err := pg.write(ctx, time.Now(), query)
+		cancel()
+		switch {
+		case errors.Is(err, errSchema):
+			logger.Fatal(err)
+		case err != nil:
+			logger.Errorf("TimescaleDB write failed, %d reports queued: %v", len(pg.queue), err)
+		default:
+			logger.Infof("Wrote %d rows to TimescaleDB", n)
+		}
+	}
+
+	if config.Influx != (tomlConfigInflux{}) {
+		write_influx(query)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
@@ -323,20 +351,23 @@ func processData(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(retval))
 }
 
-func simple_parseFloat(s string) float64 {
+// An unexpected value is skipped rather than taking the whole program down.
+func simple_parseFloat(s string) (float64, bool) {
 	rv, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		logger.Fatalf("error converting \"%s\" to float64: %s", s, err)
+		logger.Warnf("skipping \"%s\": not a float: %s", s, err)
+		return 0, false
 	}
-	return rv
+	return rv, true
 }
 
-func simple_parseInt(s string) int64 {
+func simple_parseInt(s string) (int64, bool) {
 	rv, err := strconv.ParseInt(s, 0, 64)
 	if err != nil {
-		logger.Fatalf("error converting \"%s\" to int32: %s", s, err)
+		logger.Warnf("skipping \"%s\": not an int: %s", s, err)
+		return 0, false
 	}
-	return rv
+	return rv, true
 }
 
 func write_influx(query url.Values) {
@@ -368,7 +399,7 @@ func write_influx(query url.Values) {
 		Addr: fmt.Sprintf("http://%s:%d", config.Influx.Hostname, config.Influx.Port),
 	})
 	if err != nil {
-		logger.Errorf("Error creating InfluxDB Client: ", err.Error())
+		logger.Errorf("Error creating InfluxDB Client: %v", err)
 	}
 	defer c.Close()
 
@@ -389,23 +420,25 @@ func write_influx(query url.Values) {
 			continue
 		}
 		if arrayContains(intfields, key) {
-			values[key] = simple_parseInt(value[0])
-		} else {
-			values[key] = simple_parseFloat(value[0])
+			if v, ok := simple_parseInt(value[0]); ok {
+				values[key] = v
+			}
+		} else if v, ok := simple_parseFloat(value[0]); ok {
+			values[key] = v
 		}
 		logger.Infof("Added Key: %s=%v (type=%s)", key, values[key], reflect.TypeOf(values[key]))
 	}
 
 	point, err := influxclient.NewPoint("weather", tags, values, time.Now())
 	if err != nil {
-		logger.Fatalf("Error: %s", err)
+		logger.Errorf("error creating InfluxDB point: %s", err)
+		return
 	}
 
 	bp.AddPoint(point)
 
-	err = c.Write(bp)
-
-	if err != nil {
-		logger.Fatal(err)
+	// An InfluxDB outage shouldn't take down MQTT or TimescaleDB
+	if err := c.Write(bp); err != nil {
+		logger.Errorf("InfluxDB write failed: %v", err)
 	}
 }
