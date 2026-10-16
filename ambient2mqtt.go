@@ -127,6 +127,29 @@ var connectLostHandler mqtt.ConnectionLostHandler = func(client mqtt.Client, err
 	logger.Errorf("Connect lost: %v", err)
 }
 
+// How long a publish may wait for the broker. A report's publishes stop at
+// the first that doesn't go through, so a broker outage (or another client
+// taking over our client id) can't leave requests hanging.
+const mqttTimeout = 5 * time.Second
+
+type publisher struct {
+	ok bool
+}
+
+func (p *publisher) publish(topic string, qos byte, payload interface{}) {
+	if !p.ok {
+		return
+	}
+	token := client.Publish(topic, qos, false, payload)
+	if !token.WaitTimeout(mqttTimeout) {
+		logger.Warnf("MQTT publish to %s timed out, skipping the rest of this report", topic)
+		p.ok = false
+	} else if err := token.Error(); err != nil {
+		logger.Warnf("MQTT publish to %s failed, skipping the rest of this report: %v", topic, err)
+		p.ok = false
+	}
+}
+
 func main() {
 	logger = log.New(os.Stderr).WithColor()
 
@@ -160,6 +183,8 @@ func main() {
 	opts.SetClientID(config.Mqtt.ClientId)
 	opts.OnConnect = connectHandler
 	opts.OnConnectionLost = connectLostHandler
+	// paho backs off up to 10 minutes between reconnects by default
+	opts.SetMaxReconnectInterval(time.Minute)
 
 	client = mqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
@@ -275,15 +300,33 @@ func arrayContains(arrayType interface{}, item interface{}) bool {
 }
 
 func processData(w http.ResponseWriter, r *http.Request) {
+	received := time.Now()
 	query := r.URL.Query()
 	logger.Infof("Request: host=%s, user-agent=%s url=%s", r.RemoteAddr, r.UserAgent(), r.URL)
 
+	// Store the report first, so an MQTT outage can't hold it up
+	if pg != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		n, err := pg.write(ctx, received, query)
+		cancel()
+		switch {
+		case errors.Is(err, errSchema):
+			logger.Fatal(err)
+		case err != nil:
+			logger.Errorf("TimescaleDB write failed, %d reports queued: %v", len(pg.queue), err)
+		default:
+			logger.Infof("Wrote %d rows to TimescaleDB", n)
+		}
+	}
+
+	mq := &publisher{ok: client.IsConnectionOpen()}
+	if !mq.ok {
+		logger.Warnf("MQTT is disconnected, not publishing this report")
+	}
 	for key, val := range query {
 		logger.Infof("%s = %s", key, val[0])
 		topic := fmt.Sprintf("%s/%s/%s", config.Mqtt.TopicPrefix, config.Mqtt.Topic, key)
-		// args are: topic, qos, retain, value
-		token := client.Publish(topic, 0, false, val[0])
-		token.Wait()
+		mq.publish(topic, 0, val[0])
 	}
 
 	// HomeAssistant has a very specific way it wants things to appear on the MQTT bus
@@ -312,32 +355,15 @@ func processData(w http.ResponseWriter, r *http.Request) {
 
 			if component.Platform != "" {
 				logger.Infof("processed key %s - topic %s", key, component.AvailabilityTopic)
-				token := client.Publish(component.AvailabilityTopic, byte(component.Qos), false, "online")
-				token.Wait()
-				token = client.Publish(component.StateTopic, byte(component.Qos), false, value[0])
-				token.Wait()
-				token = client.Publish(component.ConfigTopic, byte(component.Qos), false, packComponentConfig(component))
-				token.Wait()
+				mq.publish(component.AvailabilityTopic, byte(component.Qos), "online")
+				mq.publish(component.StateTopic, byte(component.Qos), value[0])
+				mq.publish(component.ConfigTopic, byte(component.Qos), packComponentConfig(component))
 				// topic := fmt.Sprintf("%s/%s/%s/config", config.Hass.DiscoveryPrefix, *component.platform, objectId)
 				// token := client.Publish(topic, 0, false, val[0])
 				// token.Wait()
 			} else {
 				logger.Warnf("got a key of %s - I don't know what to do with this", key)
 			}
-		}
-	}
-
-	if pg != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		n, err := pg.write(ctx, time.Now(), query)
-		cancel()
-		switch {
-		case errors.Is(err, errSchema):
-			logger.Fatal(err)
-		case err != nil:
-			logger.Errorf("TimescaleDB write failed, %d reports queued: %v", len(pg.queue), err)
-		default:
-			logger.Infof("Wrote %d rows to TimescaleDB", n)
 		}
 	}
 
